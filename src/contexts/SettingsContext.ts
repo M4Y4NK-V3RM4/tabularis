@@ -60,6 +60,8 @@ export interface Settings {
   resultTypeColors?: Record<string, string>;
   /** Keep the result grid's column headers pinned to the top while scrolling. Default: true. */
   stickyColumnHeaders?: boolean;
+  /** Shade every other result grid row for easier scanning. Default: false. */
+  resultZebraStripes?: boolean;
   /** Font used for query result cells. A font name from AVAILABLE_FONTS, a custom family, or RESULT_FONT_INHERIT to follow the interface font. Default: "JetBrains Mono". */
   resultFontFamily?: string;
   aiEnabled: boolean;
@@ -101,6 +103,10 @@ export interface Settings {
   runStatementUnderCursor?: boolean;
   /** Delay destructive-query and production-write confirmations for five seconds. Default: false. */
   safetyConfirmationDelayEnabled?: boolean;
+  /** Send a desktop notification when a long-running query finishes while the window is unfocused. Default: true. */
+  notifyLongQueries?: boolean;
+  /** Minimum execution time in seconds before a finished query triggers a notification. Default: 20. */
+  notifyLongQueriesThresholdSec?: number;
   // SQL Formatter
   formatterKeywordCase?: "upper" | "lower" | "preserve";
   formatterIndentStyle?: "standard" | "tabularLeft" | "tabularRight";
@@ -220,6 +226,7 @@ export const DEFAULT_SETTINGS: Settings = {
   resultColorByType: false,
   resultTypeColors: {},
   stickyColumnHeaders: true,
+  resultZebraStripes: false,
   resultFontFamily: "JetBrains Mono",
   aiEnabled: false,
   aiProvider: null,
@@ -243,6 +250,8 @@ export const DEFAULT_SETTINGS: Settings = {
   editorAcceptSuggestionOnEnter: true,
   runStatementUnderCursor: true,
   safetyConfirmationDelayEnabled: false,
+  notifyLongQueries: true,
+  notifyLongQueriesThresholdSec: 20,
   formatterKeywordCase: "upper",
   formatterIndentStyle: "standard",
   formatterTabWidth: 2,

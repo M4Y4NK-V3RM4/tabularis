@@ -97,7 +97,9 @@ import { newConsoleForDatabase } from "../../utils/newConsole";
 import { openEditor } from "../../utils/editorNavigation";
 import {
   DEFAULT_CREATE_TABLE_TARGET,
+  getClipboardImportTarget,
   getCreateTableRefreshPlan,
+  resolveCreateTableSchema,
   type CreateTableTarget,
 } from "../../utils/createTable";
 
@@ -221,6 +223,8 @@ export const ExplorerSidebar = ({ sidebarWidth, startResize, onCollapse, sidebar
   const [isCreateTableModalOpen, setIsCreateTableModalOpen] = useState(false);
   const [createTableTarget, setCreateTableTarget] = useState<CreateTableTarget>(DEFAULT_CREATE_TABLE_TARGET);
   const [isClipboardImportOpen, setIsClipboardImportOpen] = useState(false);
+  // Schema of the table whose menu opened the import; undefined means the active schema.
+  const [clipboardImportSchema, setClipboardImportSchema] = useState<string>();
   const [modifyColumnModal, setModifyColumnModal] = useState<{
     isOpen: boolean;
     tableName: string;
@@ -304,8 +308,8 @@ export const ExplorerSidebar = ({ sidebarWidth, startResize, onCollapse, sidebar
     setIsCreateTableModalOpen(true);
   };
 
-  const refreshAfterCreateTable = async () => {
-    const refreshPlan = getCreateTableRefreshPlan(createTableTarget);
+  const refreshAfterCreateTable = async (target: CreateTableTarget) => {
+    const refreshPlan = getCreateTableRefreshPlan(target);
 
     if (refreshPlan.scope === "schema") {
       await refreshSchemaData(refreshPlan.schema);
@@ -381,6 +385,7 @@ export const ExplorerSidebar = ({ sidebarWidth, startResize, onCollapse, sidebar
   useEffect(() => {
     const handler = () => {
       if (activeConnectionId && activeCapabilities?.no_connection_required !== true) {
+        setClipboardImportSchema(undefined);
         setIsClipboardImportOpen(true);
       }
     };
@@ -446,18 +451,19 @@ export const ExplorerSidebar = ({ sidebarWidth, startResize, onCollapse, sidebar
     objectNavigation?.openRoutineDefinition(routine, schema);
   };
 
-  const handleNewRoutine = async (routineType: string) => {
+  const handleNewRoutine = async (routineType: string, schema?: string) => {
+    const targetSchema = schema ?? activeSchema ?? undefined;
     try {
       const template = await invoke<string>("get_routine_create_template", {
         connectionId: activeConnectionId,
         routineType,
-        ...(activeSchema ? { schema: activeSchema } : {}),
+        ...(targetSchema ? { schema: targetSchema } : {}),
       });
       const tabName =
         routineType === "FUNCTION"
           ? t("routines.newFunction")
           : t("routines.newProcedure");
-      runQuery(template, tabName, true, activeSchema ?? undefined);
+      runQuery(template, tabName, true, targetSchema);
     } catch (e) {
       console.error(e);
       showAlert(t("routines.templateError") + String(e), { kind: "error" });
@@ -497,6 +503,13 @@ export const ExplorerSidebar = ({ sidebarWidth, startResize, onCollapse, sidebar
     e.preventDefault();
     setContextMenu({ x: e.clientX, y: e.clientY, type, id, label, data });
   };
+
+  // "+" on a schema's or database's Routines header; that schema becomes the routine's target.
+  const openNewRoutineMenu =
+    activeCapabilities?.routine_management === true
+      ? (e: React.MouseEvent, schema: string) =>
+          handleContextMenu(e, "routines-new", "routines-new", t("routines.newRoutine"), { schema })
+      : undefined;
 
   const handleImportDatabase = async (database?: string) => {
     const file = await open({
@@ -1228,6 +1241,7 @@ export const ExplorerSidebar = ({ sidebarWidth, startResize, onCollapse, sidebar
                           onCreateTrigger={(schema) =>
                             setTriggerEditorModal({ isOpen: true, isNewTrigger: true, schema })
                           }
+                          onCreateRoutine={openNewRoutineMenu}
                           showTriggers={activeCapabilities?.triggers === true}
                           refreshingMatView={refreshingMatView}
                         />
@@ -1491,6 +1505,7 @@ export const ExplorerSidebar = ({ sidebarWidth, startResize, onCollapse, sidebar
                       onCreateTrigger={(schema) =>
                         setTriggerEditorModal({ isOpen: true, isNewTrigger: true, schema })
                       }
+                      onCreateRoutine={openNewRoutineMenu}
                       onDump={activeCapabilities?.no_connection_required !== true ? (db) => setDumpModal({ database: db }) : undefined}
                       onImport={activeCapabilities?.no_connection_required !== true ? (db) => handleImportDatabase(db) : undefined}
                       onViewDiagram={activeCapabilities?.no_connection_required !== true ? async (db) => {
@@ -1974,7 +1989,10 @@ export const ExplorerSidebar = ({ sidebarWidth, startResize, onCollapse, sidebar
                     supportsManageTables(activeCapabilities) ? {
                       label: t("clipboardImport.contextMenuLabel"),
                       icon: Clipboard,
-                      action: () => setIsClipboardImportOpen(true),
+                      action: () => {
+                        setClipboardImportSchema(ctxSchema);
+                        setIsClipboardImportOpen(true);
+                      },
                     } : null,
                     {
                       label: t("sidebar.copyName"),
@@ -2335,18 +2353,22 @@ export const ExplorerSidebar = ({ sidebarWidth, startResize, onCollapse, sidebar
                               ].filter(Boolean) as ContextMenuItem[];
                             })()
                           : contextMenu.type === "routines-new"
-                            ? [
-                                {
-                                  label: t("routines.newProcedure"),
-                                  icon: FileCode,
-                                  action: () => handleNewRoutine("PROCEDURE"),
-                                },
-                                {
-                                  label: t("routines.newFunction"),
-                                  icon: FileCode,
-                                  action: () => handleNewRoutine("FUNCTION"),
-                                },
-                              ]
+                            ? (() => {
+                                // Set when opened from a schema/database header; the flat layout uses the active schema.
+                                const routineSchema = (contextMenu.data as { schema?: string } | undefined)?.schema;
+                                return [
+                                  {
+                                    label: t("routines.newProcedure"),
+                                    icon: FileCode,
+                                    action: () => handleNewRoutine("PROCEDURE", routineSchema),
+                                  },
+                                  {
+                                    label: t("routines.newFunction"),
+                                    icon: FileCode,
+                                    action: () => handleNewRoutine("FUNCTION", routineSchema),
+                                  },
+                                ];
+                              })()
                           : contextMenu.type === "trigger"
                             ? (() => {
                                 const triggerData = contextMenu.data && 'table_name' in contextMenu.data
@@ -2549,7 +2571,7 @@ export const ExplorerSidebar = ({ sidebarWidth, startResize, onCollapse, sidebar
         <CreateTableModal
           isOpen={isCreateTableModalOpen}
           onClose={() => setIsCreateTableModalOpen(false)}
-          onSuccess={refreshAfterCreateTable}
+          onSuccess={() => refreshAfterCreateTable(createTableTarget)}
           schema={createTableTarget.schema}
         />
       )}
@@ -2557,12 +2579,16 @@ export const ExplorerSidebar = ({ sidebarWidth, startResize, onCollapse, sidebar
       {isClipboardImportOpen && (
         <ClipboardImportModal
           isOpen={isClipboardImportOpen}
+          schema={clipboardImportSchema}
           onClose={() => setIsClipboardImportOpen(false)}
-          onSuccess={() => {
-            if (refreshTables) refreshTables();
-            setSchemaVersion((v) => v + 1);
-            setIsClipboardImportOpen(false);
-          }}
+          onSuccess={() =>
+            refreshAfterCreateTable(
+              getClipboardImportTarget(resolveCreateTableSchema(clipboardImportSchema, activeSchema), {
+                schemaLayout: activeCapabilities?.schemas === true && schemas.length > 0,
+                multiDatabaseLayout: isMultiDb,
+              }),
+            )
+          }
         />
       )}
 
@@ -2740,7 +2766,7 @@ export const ExplorerSidebar = ({ sidebarWidth, startResize, onCollapse, sidebar
           routine={runRoutineModal.routine}
           schema={runRoutineModal.schema}
           onRun={(sql) => {
-            runQuery(sql, `${t("routines.runTabPrefix")} ${runRoutineModal.routine.name}`, false, runRoutineModal.schema);
+            runQuery(sql, `${t("routines.runTabPrefix")} ${runRoutineModal.routine.name}`, true, runRoutineModal.schema);
           }}
         />
       )}

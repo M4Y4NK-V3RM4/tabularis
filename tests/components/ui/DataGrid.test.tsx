@@ -1,6 +1,6 @@
 import { act, render, fireEvent, screen, waitFor } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
-import { createRef, useState } from "react";
+import { createRef, useState, type ComponentProps } from "react";
 import { vi } from "vitest";
 import {
   DataGrid,
@@ -11,6 +11,12 @@ import {
   serializePkKey,
   USE_DEFAULT_SENTINEL,
 } from "../../../src/utils/dataGrid";
+
+vi.mock("lucide-react", async (importOriginal) => await importOriginal());
+vi.mock("../../../src/components/ui/CellCodeEditor", () => ({
+  CellCodeEditor: ({ value, onChange }: { value: string; onChange: (value: string) => void }) =>
+    <textarea aria-label="Expanded value" value={value} onChange={(event) => onChange(event.target.value)} />,
+}));
 
 vi.mock("../../../src/hooks/useDatabase", () => ({
   useDatabase: () => ({ activeSchema: null, connections: [] }),
@@ -27,6 +33,7 @@ const {
   scrollToIndexMock,
   scrollToOffsetMock,
   virtualizerRenderControl,
+  sidebarState,
 } = vi.hoisted(() => ({
   showToastMock: vi.fn(),
   openRowEditorMock: vi.fn(),
@@ -36,6 +43,7 @@ const {
   // Lets a single test simulate the virtualizer's first, unmeasured commit,
   // where it has no virtual items yet.
   virtualizerRenderControl: { forceEmpty: false },
+  sidebarState: { isOpen: false, activePanel: null as string | null },
 }));
 
 vi.mock("../../../src/hooks/useToast", () => ({
@@ -62,8 +70,7 @@ vi.mock("../../../src/hooks/useSettings", () => ({
 
 vi.mock("../../../src/hooks/useRightSidebar", () => ({
   useRightSidebar: () => ({
-    isOpen: false,
-    activePanel: null,
+    ...sidebarState,
     rowEditorData: null,
     isPinned: false,
     openRowEditor: openRowEditorMock,
@@ -557,6 +564,61 @@ describe("DataGrid keyboard editing", () => {
 
     expect(container.querySelector("textarea")).toBeNull();
     expect(gridOf(container)).toHaveFocus();
+  });
+
+  it("reports editing immediately and releases the block on cancel and unmount", async () => {
+    const ref = createRef<DataGridCommandTarget>();
+    const onEditingChange = vi.fn();
+    const onPendingChange = vi.fn();
+    const { container, unmount } = render(<DataGrid ref={ref} columns={["id", "name"]}
+      data={[[1, "Alice"]]} tableName="users" pkColumns={["id"]}
+      onPendingChange={onPendingChange} onEditingChange={onEditingChange} />);
+    fireEvent.doubleClick(cellAt(container, 0, 1));
+    expect(ref.current?.isEditing()).toBe(true);
+    expect(onEditingChange).toHaveBeenLastCalledWith(true);
+    fireEvent.keyDown(container.querySelector("textarea")!, { key: "Escape" });
+    expect(ref.current?.isEditing()).toBe(false);
+    expect(onEditingChange).toHaveBeenLastCalledWith(false);
+    await act(async () => {});
+    expect(onPendingChange).not.toHaveBeenCalled();
+    fireEvent.doubleClick(cellAt(container, 0, 1));
+    unmount();
+    expect(onEditingChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it("blocks refresh while the expanded text editor is open", () => {
+    const ref = createRef<DataGridCommandTarget>();
+    const onEditingChange = vi.fn();
+    render(<DataGrid ref={ref} columns={["id", "description"]}
+      data={[[1, "long description ".repeat(20)]]} tableName="jobs" pkColumns={["id"]}
+      columnMetadata={[{ name: "description", data_type: "text", is_pk: false, is_nullable: true, is_auto_increment: false }]}
+      onPendingChange={vi.fn()} onEditingChange={onEditingChange} />);
+    fireEvent.click(screen.getByRole("button", { name: "textCell.expand" }));
+    expect(ref.current?.isEditing()).toBe(true);
+    expect(onEditingChange).toHaveBeenLastCalledWith(true);
+    fireEvent.click(screen.getByRole("button", { name: "common.cancel" }));
+    expect(ref.current?.isEditing()).toBe(false);
+    expect(onEditingChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it("releases the row-editor block when the sidebar closes", () => {
+    const ref = createRef<DataGridCommandTarget>();
+    const onEditingChange = vi.fn();
+    const grid = () => <DataGrid ref={ref} columns={["id"]} data={[[1]]}
+      onEditingChange={onEditingChange} />;
+    try {
+      sidebarState.isOpen = true;
+      sidebarState.activePanel = "row-editor";
+      const { rerender } = render(grid());
+      expect(ref.current?.isEditing()).toBe(true);
+      sidebarState.isOpen = false;
+      rerender(grid());
+      expect(ref.current?.isEditing()).toBe(false);
+      expect(onEditingChange).toHaveBeenLastCalledWith(false);
+    } finally {
+      sidebarState.isOpen = false;
+      sidebarState.activePanel = null;
+    }
   });
 
   it("opens an empty editor for a cell pending the database DEFAULT", () => {
@@ -1514,6 +1576,168 @@ describe("DataGrid sensitive-column masking (#485)", () => {
     );
     fireEvent.doubleClick(cellAt(container, 0, 1));
     expect(container.querySelector("textarea")).toBeInTheDocument();
+  });
+});
+
+describe("DataGrid filter-by-value context menu", () => {
+  const cellAt = (container: HTMLElement, rowIndex: number, colIndex: number) =>
+    container.querySelector(
+      `tr[data-row-index="${rowIndex}"] td[data-col-index="${colIndex}"]`,
+    )!;
+
+  const usersMetadata = [
+    {
+      name: "id",
+      data_type: "integer",
+      is_pk: true,
+      is_nullable: false,
+      is_auto_increment: false,
+    },
+    {
+      name: "name",
+      data_type: "character varying(255)",
+      is_pk: false,
+      is_nullable: true,
+      is_auto_increment: false,
+    },
+    {
+      name: "email",
+      data_type: "character varying(255)",
+      is_pk: false,
+      is_nullable: true,
+      is_auto_increment: false,
+    },
+    {
+      name: "avatar",
+      data_type: "bytea",
+      is_pk: false,
+      is_nullable: true,
+      is_auto_increment: false,
+    },
+    {
+      name: "settings",
+      data_type: "jsonb",
+      is_pk: false,
+      is_nullable: true,
+      is_auto_increment: false,
+    },
+  ];
+
+  const renderUsersGrid = (
+    overrides: Partial<ComponentProps<typeof DataGrid>> = {},
+  ) => {
+    const onFilterByValue = vi.fn();
+    const utils = render(
+      <DataGrid
+        columns={["id", "name", "email", "avatar", "settings"]}
+        data={[[1, "Alice", "alice@example.com", "BLOB:3:image/png:AAEC", { theme: "dark" }]]}
+        tableName="users"
+        pkColumns={["id"]}
+        columnMetadata={usersMetadata}
+        onFilterByValue={onFilterByValue}
+        // Read-only keeps the editing items (and their icons) out of the
+        // menu; the filter items only depend on tableName.
+        readonly
+        selectedRows={new Set()}
+        onSelectionChange={vi.fn()}
+        {...overrides}
+      />,
+    );
+    return { ...utils, onFilterByValue };
+  };
+
+  it("offers = / <> on a regular cell and passes the cell value", async () => {
+    const { container, onFilterByValue } = renderUsersGrid();
+
+    fireEvent.contextMenu(cellAt(container, 0, 1));
+    fireEvent.click(await screen.findByText("dataGrid.filterEquals"));
+
+    expect(screen.queryByText("dataGrid.filterIsNull")).toBeNull();
+    expect(onFilterByValue).toHaveBeenCalledWith(
+      "name",
+      "=",
+      "Alice",
+      "character varying(255)",
+    );
+  });
+
+  it("offers only IS NULL / IS NOT NULL on a masked cell and never passes its value", async () => {
+    const { container, onFilterByValue } = renderUsersGrid();
+
+    // "email" is masked by DEFAULT_MASKING_PATTERNS (settings mock is `{}`).
+    expect(cellAt(container, 0, 2)).toHaveTextContent("••••••");
+    fireEvent.contextMenu(cellAt(container, 0, 2));
+
+    expect(await screen.findByText("dataGrid.filterIsNull")).toBeInTheDocument();
+    expect(screen.getByText("dataGrid.filterIsNotNull")).toBeInTheDocument();
+    expect(screen.queryByText("dataGrid.filterEquals")).toBeNull();
+    expect(screen.queryByText("dataGrid.filterNotEquals")).toBeNull();
+
+    fireEvent.click(screen.getByText("dataGrid.filterIsNotNull"));
+    expect(onFilterByValue).toHaveBeenCalledWith(
+      "email",
+      "IS NOT NULL",
+      null,
+      "character varying(255)",
+    );
+    expect(JSON.stringify(onFilterByValue.mock.calls)).not.toContain(
+      "alice@example.com",
+    );
+  });
+
+  it("offers = / <> again once the masked cell is revealed", async () => {
+    const { container } = renderUsersGrid();
+
+    fireEvent.click(
+      cellAt(container, 0, 2).querySelector(
+        'button[title="dataGrid.revealCell"]',
+      )!,
+    );
+    fireEvent.contextMenu(cellAt(container, 0, 2));
+
+    expect(await screen.findByText("dataGrid.filterEquals")).toBeInTheDocument();
+    expect(screen.queryByText("dataGrid.filterIsNull")).toBeNull();
+  });
+
+  it("hides the items on BLOB and JSON cells", async () => {
+    const { container } = renderUsersGrid();
+
+    fireEvent.contextMenu(cellAt(container, 0, 3));
+    // Wait for the menu itself, then check the filter items are absent.
+    await screen.findByText("dataGrid.copyCell");
+    expect(screen.queryByText("dataGrid.filterEquals")).toBeNull();
+    expect(screen.queryByText("dataGrid.filterIsNull")).toBeNull();
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    fireEvent.contextMenu(cellAt(container, 0, 4));
+    await screen.findByText("contextMenu.openJsonEditor");
+    expect(screen.queryByText("dataGrid.filterEquals")).toBeNull();
+    expect(screen.queryByText("dataGrid.filterIsNull")).toBeNull();
+  });
+
+  it("hides the items on pending insertion rows", async () => {
+    const { container } = renderUsersGrid({
+      pendingInsertions: {
+        pending: {
+          tempId: "pending",
+          data: { id: 2, name: "Bob" },
+          displayIndex: 1,
+        },
+      },
+    });
+
+    fireEvent.contextMenu(cellAt(container, 1, 1));
+    await screen.findByText("dataGrid.copyCell");
+    expect(screen.queryByText("dataGrid.filterEquals")).toBeNull();
+    expect(screen.queryByText("dataGrid.filterIsNull")).toBeNull();
+  });
+
+  it("hides the items when there is no table (query results)", async () => {
+    const { container } = renderUsersGrid({ tableName: null });
+
+    fireEvent.contextMenu(cellAt(container, 0, 1));
+    await screen.findByText("dataGrid.copyCell");
+    expect(screen.queryByText("dataGrid.filterEquals")).toBeNull();
   });
 });
 
